@@ -33,7 +33,7 @@ int main(int argc, char *argv[]) {
 
 	Server<EchoHandler> server;
 
-	server.start_serving(8080,3);
+	server.start_serving(8080,10);
 
     while (!stopServing) {
         std::this_thread::sleep_for(50ms);

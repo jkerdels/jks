@@ -29,7 +29,7 @@ class Server
 {
 	static const int PollTimeout    = 100;
 	static const int ListenBacklog  = 128;
-	static const int MaxConnections = 1000;
+	static const int MaxConnections = 10000;
 
 public:
 	Server() :
