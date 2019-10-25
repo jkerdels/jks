@@ -1,3 +1,4 @@
+#include <cstring>
 #include <algorithm>
 
 #include <inttypes.h>
@@ -10,23 +11,32 @@
 
 #include "server.h"
 
-template<class ConHandler, typename... ConHandlerArgs>
-jk::Server::Server(ConHandlerArgs&&... args) :
-	conHandlerArgs(std::forward<ConHandlerArgs>(args)...),
+template<class ConHandler>
+jk::Server<ConHandler>::Server() :
 	spooler(),
 	listener()
 {
 
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-jk::Server::~Server()
+template<class ConHandler>
+jk::Server<ConHandler>::~Server()
 {
-	stopServing();
+	stop_serving();
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::startServing(int port, int nr_of_threads)
+/*
+template<class ConHandler>
+void jk::Server<ConHandler>::set_handler_arguments(ConHandlerArgs&&... args)
+{
+	if constexpr (std::tuple_size<std::tuple<ConHandlerArgs...>>::value > 0) {
+		conHandlerArgs = std::make_tuple(std::forward<ConHandlerArgs>(args)...);
+	}
+}
+*/
+
+template<class ConHandler>
+void jk::Server<ConHandler>::start_serving(int port, int nr_of_threads)
 {
 	if (port < 1) {
 		port = 1;
@@ -47,8 +57,8 @@ void jk::Server::startServing(int port, int nr_of_threads)
 	listener.start();
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::stopServing()
+template<class ConHandler>
+void jk::Server<ConHandler>::stop_serving()
 {
 	listener.finish();
 
@@ -60,8 +70,8 @@ void jk::Server::stopServing()
 
 //------------------------------------------------------------------------
 //------------------------------------------------------------------------
-template<class ConHandler, typename... ConHandlerArgs>
-jk::Server::Spooler::Spooler() :
+template<class ConHandler>
+jk::Server<ConHandler>::Spooler::Spooler() :
 	connections(),
 	newConnections(),
 	pollSet(),
@@ -80,14 +90,14 @@ jk::Server::Spooler::Spooler() :
 	lpPoll.revents = 0;
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-jk::Server::Spooler::~Spooler()
+template<class ConHandler>
+jk::Server<ConHandler>::Spooler::~Spooler()
 {
 	finish();
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Spooler::start()
+template<class ConHandler>
+void jk::Server<ConHandler>::Spooler::start()
 {
 	finish();
 
@@ -95,14 +105,8 @@ void jk::Server::Spooler::start()
 	curThread = new std::thread(*this);
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Spooler::update()
-{
-	break_poll();
-}
-
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Spooler::finish()
+template<class ConHandler>
+void jk::Server<ConHandler>::Spooler::finish()
 {
 	if (curThread == nullptr) {
 		return;
@@ -117,8 +121,8 @@ void jk::Server::Spooler::finish()
 	curThread = nullptr;	
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Spooler::add_connection(int fd)
+template<class ConHandler>
+void jk::Server<ConHandler>::Spooler::add_connection(int fd)
 {
 	lock_connections();
 	// don't accept connections when finished or not started
@@ -129,18 +133,20 @@ void jk::Server::Spooler::add_connection(int fd)
 	}
 	Connection newCon;
 	newCon.fd = fd;
+	/*
 	if constexpr (std::tuple_size<std::tuple<ConHandlerArgs...>>::value > 0) {
 		std::apply([&](ConHandlerArgs&&... args){ 
 			newCon.handler.init(std::forward<ConHandlerArgs>(args)...); 
 		}, conHandlerArgs);
 	}
+	*/
 	newConnections.push_back(newCon);
 	unlock_connections();
-	update();
+	break_poll();
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-size_t jk::Server::Spooler::connection_count()
+template<class ConHandler>
+size_t jk::Server<ConHandler>::Spooler::connection_count()
 {
 	size_t result = 0;
 	lock_connections();
@@ -149,8 +155,8 @@ size_t jk::Server::Spooler::connection_count()
 	return result;
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-size_t jk::Server::Spooler::new_connection_count()
+template<class ConHandler>
+size_t jk::Server<ConHandler>::Spooler::new_connection_count()
 {
 	size_t result = 0;
 	lock_connections();
@@ -159,8 +165,8 @@ size_t jk::Server::Spooler::new_connection_count()
 	return result;
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Spooler::operator()
+template<class ConHandler>
+void jk::Server<ConHandler>::Spooler::operator()()
 {
 	while (stopPolling == false) {
 		// add new connections
@@ -198,7 +204,7 @@ void jk::Server::Spooler::operator()
 			auto con_it = std::lower_bound(
 						  	connections.begin(),connections.end(),
 						  	ps_entry.fd, 
-						  	[](const Connection &a, const Connection &b,) -> bool {
+						  	[](const Connection &a, const Connection &b) -> bool {
 						  		return a.fd < b.fd;
 						  });
 
@@ -214,10 +220,10 @@ void jk::Server::Spooler::operator()
 			}
 
 			if ((ps_entry.revents & POLLIN) || (ps_entry.revents & POLLPRI)) {
-				con_it->handler.read();
+				con_it->handler.read_from_socket();
 			}
 			if (ps_entry.revents & POLLOUT) {
-				con_it->handler.write();
+				con_it->handler.write_to_socket();
 			}
 			if (con_it->handler.connection_closed() == true) {
 				close(ps_entry.fd);
@@ -228,7 +234,7 @@ void jk::Server::Spooler::operator()
 		lock_connections();
 		connections.erase(
 			std::remove_if(connections.begin(),connections.end(),
-						   []](const Connection &a) -> bool {
+						   [](const Connection &a) -> bool {
 							  return a.handler.connection_closed();
 						  }),
 			connections.end()
@@ -250,22 +256,22 @@ void jk::Server::Spooler::operator()
 	unlock_connections();
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Spooler::break_poll()
+template<class ConHandler>
+void jk::Server<ConHandler>::Spooler::break_poll()
 {
 	// write something to local pipe to make poll return
 	uint8_t data = 1;
 	write(localPipe[1],&data,1);	
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Spooler::lock_connections()
+template<class ConHandler>
+void jk::Server<ConHandler>::Spooler::lock_connections()
 {
 	while(conLock.test_and_set());
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Spooler::unlock_connections()
+template<class ConHandler>
+void jk::Server<ConHandler>::Spooler::unlock_connections()
 {
 	conLock.clear();
 }
@@ -273,8 +279,8 @@ void jk::Server::Spooler::unlock_connections()
 
 //------------------------------------------------------------------------
 //------------------------------------------------------------------------
-template<class ConHandler, typename... ConHandlerArgs>
-jk::Server::Listener::Listener() :
+template<class ConHandler>
+jk::Server<ConHandler>::Listener::Listener() :
 	port(-1),
 	stopListening(false),
 	curThread(nullptr)
@@ -282,14 +288,14 @@ jk::Server::Listener::Listener() :
 
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-jk::Server::Listener::~Listener()
+template<class ConHandler>
+jk::Server<ConHandler>::Listener::~Listener()
 {
 	finish();
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Listener::operator()
+template<class ConHandler>
+void jk::Server<ConHandler>::Listener::operator()()
 {
     // set up server socket
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -385,7 +391,7 @@ void jk::Server::Listener::operator()
             if (min_spool->connection_count() < MaxConnections) {
             	min_spool->add_connection(newConnection);
             	if (min_spool->new_connection_count() > ListenBacklog/2) {
-            		min_spool->update();
+            		min_spool->break_poll();
             	}
             } else {
                 close(newConnection);
@@ -398,14 +404,14 @@ void jk::Server::Listener::operator()
 
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Listener::set_port(int _port)
+template<class ConHandler>
+void jk::Server<ConHandler>::Listener::set_port(int _port)
 {
 	port = _port;
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Listener::start()
+template<class ConHandler>
+void jk::Server<ConHandler>::Listener::start()
 {
 	finish();
 
@@ -413,8 +419,8 @@ void jk::Server::Listener::start()
 	curThread = new std::thread(*this);
 }
 
-template<class ConHandler, typename... ConHandlerArgs>
-void jk::Server::Listener::finish()
+template<class ConHandler>
+void jk::Server<ConHandler>::Listener::finish()
 {
 	if (curThread == nullptr) {
 		return;
