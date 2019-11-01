@@ -33,7 +33,7 @@ class Server
 
 public:
 	Server() :
-	    ch_param_func(nullptr),
+	    ch_param_func([](ConnectionHandler&){}),
 		worker(),
 		port(0),
 		stopListening(true),
@@ -179,9 +179,7 @@ private:
 			}
 			auto new_con = connections.emplace(std::make_pair(fd,ConnectionHandler()));
 			new_con.first->second.set_sockets(fd,localPipe);
-			if ((parent != nullptr) && (parent->ch_param_func != nullptr)) {
-				parent->ch_param_func(new_con.first->second);
-			}
+			parent->ch_param_func(new_con.first->second);
 			newCons++;
 			conLock.clear();
 			break_poll();
