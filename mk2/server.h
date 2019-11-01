@@ -33,6 +33,7 @@ class Server
 
 public:
 	Server() :
+	    ch_param_func(nullptr),
 		worker(),
 		port(0),
 		stopListening(true),
@@ -54,6 +55,7 @@ public:
 
 		worker.resize(nrOfThreads-1);
 		for (auto &w : worker) {
+			w.set_parent(this);
 			w.start();
 		}
 
@@ -78,7 +80,16 @@ public:
 		}
 	}
 
+	template<class... Args>
+	void set_ch_params(Args... args) {
+		ch_param_func = [=](ConnectionHandler &ch) {
+			ch.set_params(args...);
+		};
+	}
+
 private:
+
+	std::function<void(ConnectionHandler &ch)> ch_param_func;
 
 	struct Worker {
 		Worker() :
@@ -88,7 +99,8 @@ private:
 			stopWorking(false),
 			lpPoll(),
 			conLock(ATOMIC_FLAG_INIT),
-			newCons(0)
+			newCons(0),
+			parent(nullptr)
 		{
 			std::printf("Worker()\n");
 			int tmp[2];
@@ -109,7 +121,8 @@ private:
 			stopWorking(other.stopWorking),
 			lpPoll(other.lpPoll),
 			conLock(ATOMIC_FLAG_INIT),
-			newCons(other.newCons)
+			newCons(other.newCons),
+			parent(other.parent)
 		{
 			std::printf("Worker(const Worker&)\n");
 		}
@@ -121,7 +134,8 @@ private:
 			stopWorking(false),
 			lpPoll(),
 			conLock(ATOMIC_FLAG_INIT),
-			newCons(0)
+			newCons(0),
+			parent(nullptr)
 		{
 			std::printf("Worker(Worker&&)\n");
 			std::swap(connections,other.connections);
@@ -130,6 +144,7 @@ private:
 			std::swap(stopWorking,other.stopWorking);
 			std::swap(lpPoll,other.lpPoll);
 			std::swap(newCons,other.newCons);
+			std::swap(parent,other.parent);
 		}
 
 		~Worker() 
@@ -147,7 +162,12 @@ private:
 			stopWorking = other.stopWorking;
 			lpPoll       = other.lpPoll;
 			newCons      = other.newCons;
+			parent       = other.parent;
 			return *this;				
+		}
+
+		void set_parent(Server *_parent) {
+			parent = _parent;
 		}
 
 		void add_connection(int fd) {
@@ -159,6 +179,9 @@ private:
 			}
 			auto new_con = connections.emplace(std::make_pair(fd,ConnectionHandler()));
 			new_con.first->second.set_sockets(fd,localPipe);
+			if ((parent != nullptr) && (parent->ch_param_func != nullptr)) {
+				parent->ch_param_func(new_con.first->second);
+			}
 			newCons++;
 			conLock.clear();
 			break_poll();
@@ -294,6 +317,7 @@ private:
 		pollfd lpPoll;
 		std::atomic_flag conLock;
 		int newCons;
+		Server *parent;
 	};
 
 public:
