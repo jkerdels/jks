@@ -8,7 +8,7 @@ set(CMAKE_CXX_FLAGS "-std=c++1z -O3")
 
 include_directories(${PROJECT_SOURCE_DIR})
 
-add_executable(Server main.cpp connectionhandler.cpp)
+add_executable(Server main.cpp connectionhandler.cpp chunkhandler.cpp)
 
 target_link_libraries(Server pthread)
 
