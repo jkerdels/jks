@@ -25,9 +25,10 @@ jk::ChunkHandler::ChunkHandler() :
 	cur_start_id(0),
 	cur_chunk_id(0),
 	cur_chunk_idx(0),
+	cur_chunk_size(0),
 	cur_chunk_data(),
-	cur_state(0),
-	cur_data_bytes_remaining(0)
+	cur_state(StartIDSearch),
+	tmp_cnt(0)
 {
 	std::memset(start_ids,       0, MaxNrOfStartIDs * sizeof(start_ids[0]));
 	std::memset(chunk_ids,       0, MaxNrOfChunks   * sizeof(chunk_ids[0]));
@@ -53,9 +54,10 @@ jk::ChunkHandler::ChunkHandler(const ChunkHandler &other) :
 	cur_start_id(other.cur_start_id),
 	cur_chunk_id(other.cur_chunk_id),
 	cur_chunk_idx(other.cur_chunk_idx),
+	cur_chunk_size(other.cur_chunk_size),
 	cur_chunk_data(other.cur_chunk_data),
 	cur_state(other.cur_state),
-	cur_data_bytes_remaining(other.cur_data_bytes_remaining)
+	tmp_cnt(other.tmp_cnt)
 {
 	std::memcpy(readBuffer,other.readBuffer,ReadBufferSize);
 	std::memcpy(writeBuffer,other.writeBuffer,WriteBufferSize);
@@ -96,9 +98,10 @@ jk::ChunkHandler& jk::ChunkHandler::operator=(const ChunkHandler& other)
 	cur_start_id             = other.cur_start_id;
 	cur_chunk_id             = other.cur_chunk_id;
 	cur_chunk_idx            = other.cur_chunk_idx;
+	cur_chunk_size           = other.cur_chunk_size;
 	cur_chunk_data           = other.cur_chunk_data;
 	cur_state                = other.cur_state;
-	cur_data_bytes_remaining = other.cur_data_bytes_remaining;
+	tmp_cnt                  = other.tmp_cnt;
 
 	return *this;
 }
@@ -270,6 +273,80 @@ void jk::ChunkHandler::poke_spooler()
 void jk::ChunkHandler::process_data(const uint8_t *data, size_t data_size)
 {
 	// chunk state machine
+	uint8_t *dp = const_cast<uint8_t*>(data);
+	uint8_t *ep = dp + data_size;
+	while (dp < ep) {
+
+		uint8_t cur_byte = *(dp++);
+
+		switch (cur_state) {
+
+			case StartIDSearch : {
+				cur_start_id = (cur_start_id << 8) | (uint32_t)cur_byte;
+				int i = 0;
+				while ((start_ids[i]) && (start_ids[i] != cur_start_id)) ++i;
+				if (start_ids[i]) {
+					tmp_cnt   = 0;
+					cur_state = ReadChunkID;
+				}
+			} break;
+
+			case ReadChunkID : {
+				cur_chunk_id = (cur_chunk_id << 8) | (uint32_t)cur_byte;
+				if (++tmp_cnt == 4) {
+					 uint64_t cid = ((uint64_t)cur_start_id << 32) | (uint64_t)cur_chunk_id;
+					 int cur_chunk_idx = 0;
+					 while ((chunk_ids[cur_chunk_idx]) && (chunk_ids[cur_chunk_idx] != cid))
+					 	++cur_chunk_idx;
+					 if (chunk_ids[cur_chunk_idx]) {
+					 	tmp_cnt   = 0;
+					 	cur_state = ReadChunkSize;
+					 } else {
+					 	// unknown chunk id
+					 	cur_start_id = 0;
+					 	cur_chunk_id = 0;
+					 	cur_state = StartIDSearch;
+					 	// try to backtrack 4 bytes if possible
+					 	dp -= (dp - data > 4) ? 4 : dp - data;
+					 }
+				} 
+			} break;
+
+			case ReadChunkSize : {
+				cur_chunk_size = (cur_chunk_size << 8) | (uint32_t)cur_byte;
+				if (++tmp_cnt == 4) {
+					if ((cur_chunk_size > chunk_max_sizes[cur_chunk_idx]) && 
+						(chunk_max_sizes[cur_chunk_idx]))
+					{
+						// chunk is too big
+					 	cur_start_id   = 0;
+					 	cur_chunk_id   = 0;
+					 	cur_chunk_size = 0;
+					 	cur_state = StartIDSearch;
+					} else {
+						cur_chunk_data.clear();
+						cur_chunk_data.reserve(cur_chunk_size);
+						cur_state = ReadData;
+					}
+				}
+			} break;
+
+			case ReadData : {
+				cur_chunk_data.push_back(cur_byte);
+				if (cur_chunk_data.size() == cur_chunk_size) {
+					chunk_handlers[cur_chunk_idx](cur_chunk_data);					
+				 	cur_start_id   = 0;
+				 	cur_chunk_id   = 0;
+				 	cur_chunk_size = 0;
+				 	cur_state = StartIDSearch;
+				}
+			} break;
+
+			default : {
+				// unknown state
+			}
+		}
+	}
 }
 
 void jk::ChunkHandler::add_start_id(uint32_t id)
@@ -279,17 +356,14 @@ void jk::ChunkHandler::add_start_id(uint32_t id)
 		return;
 	}
 
-	bool found_slot = false;
-	for (int i = 0; i < MaxNrOfStartIDs-1; ++i) {
-		if (start_ids[i] == 0) {
-			found_slot = true;
-			start_ids[i] = id;
-			break;
-		} 
+	int i = 0;
+	while (start_ids[i]) ++i;
+
+	if (i == MaxNrOfStartIDs-1) {
+		// not enough space for another start id
+		return;
 	}
-	if (!found_slot) {
-		// handle error
-	}
+	start_ids[i] = id;
 }
 
 void jk::ChunkHandler::add_start_id(const char *id)
@@ -322,21 +396,53 @@ void jk::ChunkHandler::add_chunk_handler(uint32_t start_id,
 	                   uint32_t chunk_id, 
 	                   std::function<void(const std::vector<uint8_t> &data)> handler, 
 	                   uint32_t max_size)
-{}
+{
+	if ((start_id == 0) || (chunk_id == 0) || (handler == nullptr)) return;
+
+	int i = 0;
+	while(chunk_ids[i]) ++i;
+
+	if (i == MaxNrOfChunks-1) {
+		// not enough space for another chunk
+		return;
+	}
+
+	uint64_t chunk_idx = ((uint64_t)start_id << 32) | (uint64_t)chunk_id;
+	chunk_ids[i]       = chunk_idx;
+	chunk_max_sizes[i] = max_size;
+	chunk_handlers[i]  = handler;
+
+}
 
 void jk::ChunkHandler::add_chunk_handler(const char *start_id,
 	                   const char *chunk_id, 
 	                   std::function<void(const std::vector<uint8_t> &data)> handler, 
 	                   uint32_t max_size)
-{}
+{
+	add_chunk_handler(chunk_from_str(start_id),chunk_from_str(chunk_id),handler,max_size);
+}
 
 void jk::ChunkHandler::remove_chunk_handler(uint32_t start_id,
 	                      uint32_t chunk_id)
-{}
+{
+	uint64_t chunk_idx = ((uint64_t)start_id << 32) | (uint64_t)chunk_id;
+	int i = 0;
+	while((chunk_ids[i]) && (chunk_ids[i] != chunk_idx)) ++i;
+
+	if (chunk_ids[i]) {
+		do {
+			chunk_ids[i]       = chunk_ids[i+1];
+			chunk_max_sizes[i] = chunk_max_sizes[i+1];
+			chunk_handlers[i]  = chunk_handlers[i+1];
+		} while (chunk_ids[i++]);
+	}
+}
 
 void jk::ChunkHandler::remove_chunk_handler(const char *start_id,
 	                      const char *chunk_id)
-{}
+{
+	remove_chunk_handler(chunk_from_str(start_id),chunk_from_str(chunk_id));
+}
 
 uint32_t jk::ChunkHandler::chunk_from_str(const char *id)
 {
@@ -346,7 +452,7 @@ uint32_t jk::ChunkHandler::chunk_from_str(const char *id)
 
 	int i = 0;
 	uint32_t cc = 0;
-	while((cc = static_cast<uint32_t>(id[i])) && (i < 4)) {
+	while((cc = (uint32_t)id[i]) && (i < 4)) {
 		result |= cc << (i++ * 8);
 	}
 	return result;

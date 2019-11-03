@@ -16,6 +16,11 @@ class ChunkHandler
 	const static int MaxNrOfStartIDs = 10;
 	const static int MaxNrOfChunks   = 100;
 
+	const static int StartIDSearch = 0;
+	const static int ReadChunkID   = 10;
+	const static int ReadChunkSize = 20;
+	const static int ReadData      = 30;
+
 public:
 	ChunkHandler();
 	ChunkHandler(const ChunkHandler &other);
@@ -89,11 +94,12 @@ private:
 	uint32_t cur_start_id;
 	uint32_t cur_chunk_id;
 	int      cur_chunk_idx;
+	uint32_t cur_chunk_size;
 
 	std::vector<uint8_t> cur_chunk_data;
 
 	uint32_t cur_state;
-	uint32_t cur_data_bytes_remaining;
+	uint32_t tmp_cnt;
 };
 
 }
